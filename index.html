@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#101114">
+  <meta name="description" content="Une aide au dessin simple : affichez un modèle en transparence sur votre caméra et dessinez par-dessus.">
+  <title>Aide au dessin</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --panel: rgba(18, 19, 23, .91);
+      --accent: #7c6cff;
+      --muted: #b7b7c2;
+    }
+    * { box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #08090b; }
+    body { min-height: 100dvh; color: white; }
+    #video { position: fixed; inset: 0; width: 100%; height: 100%; object-fit: cover; z-index: 0; background: #101114; }
+    #modele { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 70%; max-height: 76%; object-fit: contain; z-index: 1; opacity: .5; display: none; pointer-events: none; }
+    .empty-state { position: fixed; z-index: 1; inset: 0; display: grid; place-content: center; justify-items: center; gap: 12px; padding: 28px; text-align: center; color: #e8e7ef; pointer-events: none; }
+    .empty-state .icon { font-size: 48px; }
+    .empty-state p { max-width: 310px; margin: 0; color: var(--muted); line-height: 1.5; }
+    .controls { position: fixed; z-index: 2; left: 50%; bottom: max(16px, env(safe-area-inset-bottom)); transform: translateX(-50%); display: grid; gap: 14px; width: min(390px, calc(100% - 28px)); padding: 16px; border: 1px solid rgba(255,255,255,.1); border-radius: 22px; background: var(--panel); box-shadow: 0 12px 40px rgba(0,0,0,.35); backdrop-filter: blur(14px); }
+    .heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    h1 { margin: 0; font-size: 17px; letter-spacing: -.02em; }
+    .hint { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
+    .row { display: flex; align-items: center; gap: 10px; }
+    .btn-upload, .btn-torch { min-height: 46px; border: 0; border-radius: 12px; color: #fff; font: inherit; font-weight: 650; cursor: pointer; }
+    .btn-upload { flex: 1; display: grid; place-items: center; padding: 0 12px; background: var(--accent); font-size: 14px; }
+    .btn-upload:hover { background: #9185ff; }
+    .btn-torch { width: 48px; background: #303139; font-size: 19px; }
+    .btn-torch.active { background: #ffce58; color: #191919; }
+    .btn-torch:disabled { opacity: .45; cursor: not-allowed; }
+    input[type="file"] { display: none; }
+    .slider-row { display: grid; grid-template-columns: 90px 1fr 38px; align-items: center; gap: 8px; color: #e7e6ed; font-size: 13px; }
+    input[type="range"] { width: 100%; accent-color: var(--accent); }
+    output { color: var(--muted); text-align: right; font-size: 12px; }
+    .status { min-height: 16px; margin: -4px 0 0; color: var(--muted); font-size: 11px; line-height: 1.4; }
+    @media (max-height: 520px) {
+      .controls { bottom: 8px; gap: 9px; padding: 11px 14px; }
+      .hint { display: none; }
+      .btn-upload, .btn-torch { min-height: 40px; }
+      #modele { max-height: 65%; }
+    }
+  </style>
+</head>
+<body>
+  <video id="video" autoplay playsinline muted aria-label="Aperçu de la caméra"></video>
+  <img id="modele" alt="Modèle à dessiner">
+  <div class="empty-state" id="emptyState">
+    <div class="icon" aria-hidden="true">🎨</div>
+    <strong>Prépare ton dessin</strong>
+    <p>Choisis une image pour la superposer à la caméra et t’aider à dessiner.</p>
+  </div>
+
+  <section class="controls" aria-label="Commandes de dessin">
+    <div class="heading">
+      <div>
+        <h1>Aide au dessin</h1>
+        <p class="hint">Superpose un modèle à ta caméra</p>
+      </div>
+    </div>
+    <div class="row">
+      <label for="fileInput" class="btn-upload">📱 Choisir une image</label>
+      <input type="file" id="fileInput" accept="image/*">
+      <button id="torchBtn" class="btn-torch" type="button" aria-label="Activer le flash" title="Flash" disabled>💡</button>
+    </div>
+    <label class="slider-row" for="opacitySlider"><span>Visibilité</span><input type="range" id="opacitySlider" min="0.1" max="1" step="0.05" value="0.5"><output id="opacityValue">50 %</output></label>
+    <label class="slider-row" for="sizeSlider"><span>Taille</span><input type="range" id="sizeSlider" min="20" max="100" step="1" value="70"><output id="sizeValue">70 %</output></label>
+    <p class="status" id="status" role="status" aria-live="polite">Démarrage de la caméra…</p>
+  </section>
+
+  <script>
+    const video = document.getElementById('video');
+    const fileInput = document.getElementById('fileInput');
+    const modele = document.getElementById('modele');
+    const emptyState = document.getElementById('emptyState');
+    const opacitySlider = document.getElementById('opacitySlider');
+    const sizeSlider = document.getElementById('sizeSlider');
+    const opacityValue = document.getElementById('opacityValue');
+    const sizeValue = document.getElementById('sizeValue');
+    const torchBtn = document.getElementById('torchBtn');
+    const status = document.getElementById('status');
+
+    let track = null;
+    let flashOn = false;
+    let imageUrl = null;
+
+    async function startCamera() {
+      if (!navigator.mediaDevices?.getUserMedia) {
+        status.textContent = 'La caméra nécessite un navigateur compatible et une connexion HTTPS.';
+        return;
+      }
+      try {
+        let stream;
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } }, audio: false });
+        } catch {
+          stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+        }
+        video.srcObject = stream;
+        track = stream.getVideoTracks()[0];
+        torchBtn.disabled = false;
+        status.textContent = 'Caméra prête. Choisis une image pour commencer.';
+      } catch (error) {
+        status.textContent = error.name === 'NotAllowedError'
+          ? 'Autorise l’accès à la caméra dans les réglages de ton navigateur.'
+          : 'Caméra indisponible. Tu peux quand même choisir une image.';
+      }
+    }
+
+    torchBtn.addEventListener('click', async () => {
+      if (!track) return;
+      const capabilities = track.getCapabilities?.();
+      if (!capabilities?.torch) {
+        status.textContent = 'Le flash n’est pas disponible sur cette caméra.';
+        return;
+      }
+      try {
+        await track.applyConstraints({ advanced: [{ torch: !flashOn }] });
+        flashOn = !flashOn;
+        torchBtn.classList.toggle('active', flashOn);
+        torchBtn.setAttribute('aria-label', flashOn ? 'Désactiver le flash' : 'Activer le flash');
+      } catch {
+        status.textContent = 'Impossible d’activer le flash sur cet appareil.';
+      }
+    });
+
+    fileInput.addEventListener('change', (event) => {
+      const file = event.target.files?.[0];
+      if (!file) return;
+      if (!file.type.startsWith('image/')) {
+        status.textContent = 'Choisis un fichier image valide.';
+        return;
+      }
+      if (imageUrl) URL.revokeObjectURL(imageUrl);
+      imageUrl = URL.createObjectURL(file);
+      modele.onload = () => {
+        modele.style.display = 'block';
+        emptyState.style.display = 'none';
+        status.textContent = 'Modèle chargé. Ajuste sa taille et sa visibilité.';
+      };
+      modele.onerror = () => { status.textContent = 'Cette image ne peut pas être ouverte.'; };
+      modele.src = imageUrl;
+    });
+
+    opacitySlider.addEventListener('input', (event) => {
+      modele.style.opacity = event.target.value;
+      opacityValue.value = `${Math.round(Number(event.target.value) * 100)} %`;
+    });
+    sizeSlider.addEventListener('input', (event) => {
+      modele.style.width = `${event.target.value}%`;
+      sizeValue.value = `${event.target.value} %`;
+    });
+
+    window.addEventListener('pagehide', () => {
+      video.srcObject?.getTracks().forEach((cameraTrack) => cameraTrack.stop());
+      if (imageUrl) URL.revokeObjectURL(imageUrl);
+    });
+
+    startCamera();
+  </script>
+</body>
+</html>
